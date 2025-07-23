@@ -1,0 +1,287 @@
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+import random
+import os
+from PIL import Image, ImageEnhance
+
+class ImageWatermarker:
+    def __init__(self, secret_key=42):
+        """初始化水印器，使用secret_key作为随机数生成器的种子"""
+        self.secret_key = secret_key
+        np.random.seed(secret_key)
+        
+    def embed_watermark(self, image_path, watermark_path, output_path, alpha=0.1):
+        """
+        将水印嵌入到图像中
+        
+        """
+        # 读取原始图像和水印图像
+        host = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        watermark = cv2.imread(watermark_path, cv2.IMREAD_COLOR)
+        
+        # 调整水印大小以匹配原始图像
+        watermark = cv2.resize(watermark, (host.shape[1], host.shape[0]))
+        
+        # 将水印嵌入到原始图像的低频部分（使用频域方法）
+        host_float = np.float32(host)
+        watermark_float = np.float32(watermark)
+        
+        # 使用DCT变换
+        host_dct = cv2.dct(host_float)
+        watermark_dct = cv2.dct(watermark_float)
+        
+        # 嵌入水印
+        watermarked_dct = host_dct + alpha * watermark_dct
+        
+        # 逆DCT变换回空间域
+        watermarked = cv2.idct(watermarked_dct)
+        watermarked = np.uint8(np.clip(watermarked, 0, 255))
+        
+        # 保存结果
+        cv2.imwrite(output_path, watermarked)
+        return output_path
+    
+    def extract_watermark(self, watermarked_path, original_path, output_path, alpha=0.1):
+        """
+        从含水印的图像中提取水印
+      
+        """
+        # 读取含水印的图像和原始图像
+        watermarked = cv2.imread(watermarked_path, cv2.IMREAD_COLOR)
+        original = cv2.imread(original_path, cv2.IMREAD_COLOR)
+        
+        # 调整大小以确保一致
+        watermarked = cv2.resize(watermarked, (original.shape[1], original.shape[0]))
+        
+        # 转换为浮点数进行DCT变换
+        watermarked_float = np.float32(watermarked)
+        original_float = np.float32(original)
+        
+        # 应用DCT变换
+        watermarked_dct = cv2.dct(watermarked_float)
+        original_dct = cv2.dct(original_float)
+        
+        # 提取水印
+        extracted_dct = (watermarked_dct - original_dct) / alpha
+        
+        # 逆DCT变换回空间域
+        extracted = cv2.idct(extracted_dct)
+        extracted = np.uint8(np.clip(extracted, 0, 255))
+        
+        # 保存提取的水印
+        cv2.imwrite(output_path, extracted)
+        return output_path
+    
+    def _psnr(self, original, watermarked):
+        """计算PSNR（峰值信噪比），评估图像质量"""
+        mse = np.mean((original - watermarked) ** 2)
+        if mse == 0:
+            return float('inf')
+        max_pixel = 255.0
+        psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
+        return psnr
+    
+    def _ssim(self, img1, img2):
+        """计算SSIM（结构相似性指数），评估图像相似性"""
+        from skimage.metrics import structural_similarity as ssim
+        # 转换为灰度图计算SSIM
+        img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        return ssim(img1_gray, img2_gray, data_range=img2_gray.max() - img2_gray.min())
+    
+    def test_robustness(self, original_image, watermarked_image, original_watermark, output_dir="robustness_tests"):
+        """
+        测试水印的鲁棒性，包括旋转、缩放、亮度调整、对比度调整等攻击
+        
+        """
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # 读取原始图像、含水印图像和原始水印
+        original = cv2.imread(original_image)
+        watermarked = cv2.imread(watermarked_image)
+        watermark = cv2.imread(original_watermark)
+        
+        # 调整水印大小以匹配原始图像
+        watermark = cv2.resize(watermark, (original.shape[1], original.shape[0]))
+        
+        # 定义测试案例
+        tests = {
+            "original": watermarked,
+            "rotation_15": self._rotate_image(watermarked, 15),
+            "rotation_30": self._rotate_image(watermarked, 30),
+            "scaling_0.8": self._scale_image(watermarked, 0.8),
+            "scaling_1.2": self._scale_image(watermarked, 1.2),
+            "brightness_up": self._adjust_brightness(watermarked, 1.5),
+            "brightness_down": self._adjust_brightness(watermarked, 0.5),
+            "contrast_up": self._adjust_contrast(watermarked, 1.5),
+            "contrast_down": self._adjust_contrast(watermarked, 0.5),
+            "jpeg_quality_50": self._jpeg_compression(watermarked, 50),
+            "jpeg_quality_30": self._jpeg_compression(watermarked, 30),
+            "cropping": self._crop_image(watermarked),
+            "flipping_horizontal": cv2.flip(watermarked, 1),
+            "flipping_vertical": cv2.flip(watermarked, 0),
+            "gaussian_noise": self._add_gaussian_noise(watermarked, 10),
+            "salt_pepper_noise": self._add_salt_pepper_noise(watermarked, 0.02),
+        }
+        
+        results = {}
+        
+        # 对每个测试案例进行处理
+        for test_name, test_image in tests.items():
+            test_output = os.path.join(output_dir, f"watermarked_{test_name}.png")
+            cv2.imwrite(test_output, test_image)
+            
+            # 提取水印
+            extracted_output = os.path.join(output_dir, f"extracted_{test_name}.png")
+            self.extract_watermark(test_output, original_image, extracted_output, alpha=0.1)
+            
+            # 读取提取的水印并计算评估指标
+            extracted = cv2.imread(extracted_output)
+            extracted = cv2.resize(extracted, (watermark.shape[1], watermark.shape[0]))
+            
+            # 计算PSNR和SSIM
+            psnr = self._psnr(watermark, extracted)
+            ssim = self._ssim(watermark, extracted)
+            
+            results[test_name] = {
+                "psnr": psnr,
+                "ssim": ssim,
+                "watermarked_image": test_output,
+                "extracted_watermark": extracted_output
+            }
+            
+            print(f"测试: {test_name} - PSNR: {psnr:.2f} dB, SSIM: {ssim:.4f}")
+        
+        # 绘制结果图表
+        self._plot_results(results, os.path.join(output_dir, "robustness_results.png"))
+        
+        return results
+    
+    def _rotate_image(self, image, angle):
+        """旋转图像"""
+        rows, cols = image.shape[:2]
+        M = cv2.getRotationMatrix2D((cols/2, rows/2), angle, 1)
+        return cv2.warpAffine(image, M, (cols, rows))
+    
+    def _scale_image(self, image, scale):
+        """缩放图像"""
+        return cv2.resize(image, None, fx=scale, fy=scale)
+    
+    def _adjust_brightness(self, image, factor):
+        """调整亮度"""
+        pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        enhancer = ImageEnhance.Brightness(pil_img)
+        enhanced_img = enhancer.enhance(factor)
+        return cv2.cvtColor(np.array(enhanced_img), cv2.COLOR_RGB2BGR)
+    
+    def _adjust_contrast(self, image, factor):
+        """调整对比度"""
+        pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        enhancer = ImageEnhance.Contrast(pil_img)
+        enhanced_img = enhancer.enhance(factor)
+        return cv2.cvtColor(np.array(enhanced_img), cv2.COLOR_RGB2BGR)
+    
+    def _jpeg_compression(self, image, quality):
+        """JPEG压缩"""
+        _, encoded = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    
+    def _crop_image(self, image):
+        """裁剪图像"""
+        height, width = image.shape[:2]
+        h_start = int(height * 0.1)
+        h_end = int(height * 0.9)
+        w_start = int(width * 0.1)
+        w_end = int(width * 0.9)
+        return image[h_start:h_end, w_start:w_end]
+    
+    def _add_gaussian_noise(self, image, sigma):
+        """添加高斯噪声"""
+        row, col, ch = image.shape
+        mean = 0
+        gauss = np.random.normal(mean, sigma, (row, col, ch))
+        gauss = gauss.reshape(row, col, ch)
+        noisy = image + gauss
+        return np.uint8(np.clip(noisy, 0, 255))
+    
+    def _add_salt_pepper_noise(self, image, amount):
+        """添加椒盐噪声"""
+        row, col, ch = image.shape
+        s_vs_p = 0.5
+        out = np.copy(image)
+        
+        # 添加盐噪声
+        num_salt = np.ceil(amount * image.size * s_vs_p)
+        coords = [np.random.randint(0, i - 1, int(num_salt)) for i in image.shape[:2]]
+        out[coords[0], coords[1], :] = 255
+        
+        # 添加椒噪声
+        num_pepper = np.ceil(amount * image.size * (1.0 - s_vs_p))
+        coords = [np.random.randint(0, i - 1, int(num_pepper)) for i in image.shape[:2]]
+        out[coords[0], coords[1], :] = 0
+        
+        return out
+    
+    def _plot_results(self, results, output_path):
+        """绘制鲁棒性测试结果图表"""
+        test_names = list(results.keys())
+        psnr_values = [results[name]["psnr"] for name in test_names]
+        ssim_values = [results[name]["ssim"] for name in test_names]
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        
+        # 绘制PSNR图表
+        ax1.bar(test_names, psnr_values, color='skyblue')
+        ax1.set_ylabel('PSNR (dB)')
+        ax1.set_title('水印鲁棒性测试 - PSNR')
+        ax1.tick_params(axis='x', rotation=90)
+        for i, v in enumerate(psnr_values):
+            ax1.text(i, v + 0.5, f'{v:.2f}', ha='center')
+        
+        # 绘制SSIM图表
+        ax2.bar(test_names, ssim_values, color='lightgreen')
+        ax2.set_ylabel('SSIM')
+        ax2.set_title('水印鲁棒性测试 - SSIM')
+        ax2.tick_params(axis='x', rotation=90)
+        for i, v in enumerate(ssim_values):
+            ax2.text(i, v + 0.01, f'{v:.4f}', ha='center')
+        
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close()
+
+# 使用示例
+if __name__ == "__main__":
+    # 创建水印器实例
+    watermarker = ImageWatermarker(secret_key=42)
+    
+    # 嵌入水印
+    watermarked_img = watermarker.embed_watermark(
+        image_path="original_image.jpg",  # 替换为实际的原始图像路径
+        watermark_path="watermark.png",   # 替换为实际的水印图像路径
+        output_path="watermarked_image.png",
+        alpha=0.1
+    )
+    
+    print(f"水印嵌入完成，保存至: {watermarked_img}")
+    
+    # 提取水印
+    extracted_watermark = watermarker.extract_watermark(
+        watermarked_path=watermarked_img,
+        original_path="original_image.jpg",  # 替换为实际的原始图像路径
+        output_path="extracted_watermark.png",
+        alpha=0.1
+    )
+    
+    print(f"水印提取完成，保存至: {extracted_watermark}")
+    
+    # 鲁棒性测试
+    robustness_results = watermarker.test_robustness(
+        original_image="original_image.jpg",  # 替换为实际的原始图像路径
+        watermarked_image=watermarked_img,
+        original_watermark="watermark.png"    # 替换为实际的水印图像路径
+    )
+    
+    print("鲁棒性测试完成，结果已保存至 robustness_tests 目录")    
